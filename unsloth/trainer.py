@@ -17,8 +17,6 @@ from typing import Optional
 from transformers import TrainingArguments
 from trl import SFTTrainer
 from . import is_bfloat16_supported
-from torch.utils.data import DataLoader
-from datasets import IterableDataset
 
 __all__ = [
     "UnslothTrainingArguments",
@@ -33,7 +31,7 @@ class UnslothTrainingArguments(TrainingArguments):
     )
     use_streaming_dataset: bool = field(
         default=False,
-        metadata={"help": "Whether to use a streaming dataset."}
+        metadata={"help": "Whether to use streaming dataset for training."}
     )
 
 def _create_unsloth_optimizer(
@@ -90,25 +88,33 @@ class UnslothTrainer(SFTTrainer):
         return self.optimizer
 
     def get_train_dataloader(self):
-        if self.train_dataset is None:
-            raise ValueError("Trainer: training requires a train_dataset.")
-
-        if isinstance(self.train_dataset, IterableDataset):
-            return DataLoader(
-                self.train_dataset,
-                batch_size=self.args.per_device_train_batch_size,
-                collate_fn=self.data_collator,
-                num_workers=self.args.dataloader_num_workers,
-                pin_memory=self.args.dataloader_pin_memory,
-            )
+        if self.args.use_streaming_dataset:
+            return self._get_streaming_train_dataloader()
         return super().get_train_dataloader()
 
-    def _get_train_sampler(self):
-        if isinstance(self.train_dataset, IterableDataset):
-            return None
-        return super()._get_train_sampler()
+    def _get_streaming_train_dataloader(self):
+        from datasets import IterableDataset
+        from torch.utils.data import DataLoader
+
+        if not isinstance(self.train_dataset, IterableDataset):
+            raise ValueError("Training dataset must be an instance of IterableDataset when use_streaming_dataset is True")
+
+        data_collator = self.data_collator
+        train_dataset = self.train_dataset
+
+        dataloader_params = {
+            "batch_size": self._train_batch_size,
+            "collate_fn": data_collator,
+            "num_workers": self.args.dataloader_num_workers,
+            "pin_memory": self.args.dataloader_pin_memory,
+        }
+
+        return DataLoader(train_dataset, **dataloader_params)
 
     def train(self, resume_from_checkpoint=None, **kwargs):
-        if isinstance(self.train_dataset, IterableDataset) and (self.args.max_steps is None or self.args.max_steps <= 0):
-            raise ValueError("When using an IterableDataset, you must specify a positive value for max_steps in TrainingArguments.")
+        if self.args.use_streaming_dataset:
+            # Override max_steps if it's not set and we're using a streaming dataset
+            if self.args.max_steps == -1:
+                raise ValueError("When using a streaming dataset, max_steps must be set to a positive integer.")
+
         return super().train(resume_from_checkpoint=resume_from_checkpoint, **kwargs)
